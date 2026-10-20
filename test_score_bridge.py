@@ -91,6 +91,27 @@ class BridgeTests(unittest.TestCase):
             bridge.compile_operation(dict(id='bad', op='ADD_TEXT', staff=1, bar=1,
                                           position=0, style='text.system.tempo', text='test'), fixture())
 
+    def test_added_line_checks_eight_supported_playback_passes(self):
+        for playback in (False, True):
+            with self.subTest(playback=playback):
+                before = fixture()
+                row = bridge.compile_operation(dict(id='line', op='ADD_LINE', staff=1, bar=1,
+                    position=0, duration=256, voice=1, style='line.staff.hairpin.crescendo',
+                    playback=playback), before)
+                after = copy.deepcopy(before)
+                after['objects'][(1, 1, 1)] = dict(Type='CrescendoLine', Position='0',
+                    StyleId='line.staff.hairpin.crescendo', Duration='256', VoiceNumber='1',
+                    Played=','.join([str(playback).lower()] * 8 + ['false']))
+                self.assertFalse(bridge.verify_changes(before, after, [row]))
+                # A wrong supported pass must still fail verification.
+                after['objects'][(1, 1, 1)]['Played'] = ','.join(
+                    [str(playback).lower()] * 7 + [str(not playback).lower(), 'false'])
+                self.assertTrue(bridge.verify_changes(before, after, [row]))
+                # Do not silently ignore unexpected out-of-range data either.
+                after['objects'][(1, 1, 1)]['Played'] = ','.join(
+                    [str(playback).lower()] * 8 + ['true'])
+                self.assertTrue(bridge.verify_changes(before, after, [row]))
+
     def test_voice_recipe_rejects_gaps_and_overlaps(self):
         def event(name, position, duration):
             f = dict(fixture()['objects'][(1, 1, 0)])

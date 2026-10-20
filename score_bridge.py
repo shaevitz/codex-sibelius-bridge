@@ -437,7 +437,10 @@ def verify_changes(before, after, ops, operations=None):
             if row[6] == 'ADD_TEXT':
                 good = values.get('StyleId') == row[7] and values.get('Text') == row[8] and values['VoiceNumber'] == str(row[10])
             elif row[6] == 'ADD_LINE':
-                good = values.get('StyleId') == row[7] and values.get('Duration') == str(row[8]) and values['VoiceNumber'] == str(row[10]) and values['Played'] == ','.join([native_bool(row[11])] * 9)
+                # Sibelius supports playback passes 1–8. The legacy snapshot also
+                # queries pass 9, which is out of range and always returns false.
+                expected_played = ','.join([native_bool(row[11])] * 8 + ['false'])
+                good = values.get('StyleId') == row[7] and values.get('Duration') == str(row[8]) and values['VoiceNumber'] == str(row[10]) and values['Played'] == expected_played
             else:
                 good = values.get('Index') == str(row[7]) and values.get('Size') == str(row[8])
             if good:
