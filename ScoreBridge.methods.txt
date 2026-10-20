@@ -1,0 +1,420 @@
+Initialize () {
+AddToPluginsMenu('Codex Score Bridge', 'Run');
+if (Sibelius.ProgramVersion >= 20200900) { SetInterpreterOption('TreatSingleCharacterAsString'); }
+}
+
+Count (items) {
+countResult = 0;
+for each item in items { countResult = countResult + 1; }
+return countResult;
+}
+
+OpenScore (path) {
+if (Sibelius.FileExists(path) = False) { return False; }
+return Sibelius.Open(path, True);
+}
+
+ScoreStatus () {
+score = Sibelius.ActiveScore;
+if (IsValid(score) = False) { return CreateDictionary('active', False); }
+return CreateDictionary('active', True, 'filename', '' & score.FileName, 'title', '' & score.Title, 'staves', 0 + score.StaffCount, 'bars', 0 + score.SystemStaff.BarCount, 'transposing', '' & score.TransposingScore);
+}
+
+ProtocolTest () {
+original = '%0A||' & Chr(10) & Chr(10) & Chr(13) & 'Bb ♭ %';
+emptyFields = SplitString('left||right', '|', False); empty = Dec(emptyFields[1]); zeroRangeIterations = 0;
+for z = 1 to 1 { zeroRangeIterations = zeroRangeIterations + 1; }
+return CreateDictionary('version', '__VERSION__', 'build', '__BUILD__', 'original', original, 'encoded', Enc(original), 'roundtrip', Dec(Enc(original)), 'empty', empty, 'empty_equals', empty = '', 'zero_range_iterations', zeroRangeIterations);
+}
+
+GetLastResult () {
+return Self._property:output;
+}
+
+RecoverJob (job) {
+if ((Sibelius.FileExists(job & '/before.sib') = False) or (Sibelius.FileExists(job & '/request.tsv') = False)) { return False; }
+request = Sibelius.ReadTextFile(job & '/request.tsv'); fields = SplitString(request[0], '|', False);
+if ((Count(fields) != 14) or (fields[0] != 'CSB1') or ((fields[2] != 'APPLY') and (fields[2] != 'ENSURE_PART'))) { return False; }
+original = Sibelius.ActiveScore;
+if (IsValid(original) = False) { return False; }
+if (original.FileName != Dec(fields[4])) { return False; }
+Sibelius.CloseAllWindowsForScore(original, False);
+return Sibelius.Open(job & '/before.sib', True);
+}
+
+Run () {
+root = '__RUNTIME__/';
+if (Sibelius.FileExists(root & 'pending.txt') = False) { return False; }
+pointer = Sibelius.ReadTextFile(root & 'pending.txt');
+if (Count(pointer) != 1) { return False; }
+job = pointer[0];
+if (Sibelius.FileExists(job & '/request.tsv') = False) { return False; }
+if (Sibelius.FileExists(job & '/status.tsv')) { return False; }
+Self._property:output = CreateDictionary('job', '' & job);
+status = job & '/status.tsv';
+Sibelius.CreateTextFile(status);
+Sibelius.AppendLineToFile(status, 'RUNNING');
+input = Sibelius.ReadTextFile(job & '/request.tsv');
+if (Count(input) < 1) { return Fail(status, 'REFUSED', 'empty request'); }
+rawHeader = SplitString(input[0], '|', False);
+h = CreateSparseArray();
+for each headerField in rawHeader { h.Push(Dec(headerField)); }
+if (Count(h) != 14) { return Fail(status, 'REFUSED', 'invalid header'); }
+Sibelius.AppendLineToFile(status, 'HEADER_READ');
+if (h[0] != 'CSB1') { return Fail(status, 'REFUSED', 'protocol differs'); }
+action = h[2];
+if ((action != 'DISCOVER') and (action != 'INSPECT') and (action != 'EXPORT') and (action != 'PREVIEW') and (action != 'APPLY') and (action != 'ENSURE_PART')) { return Fail(status, 'REFUSED', 'unknown action'); }
+score = Sibelius.ActiveScore;
+if (IsValid(score) = False) { return Fail(status, 'REFUSED', 'no active score'); }
+oldPart = score.CurrentDynamicPart;
+full = null;
+for each part in score.DynamicParts { if (part.IsFullScore) { full = part; } }
+if (IsValid(full) = False) { return Fail(status, 'REFUSED', 'no full score'); }
+score.CurrentDynamicPart = full;
+if (action != 'DISCOVER') {
+if ((score.Title != h[3]) or (score.FileName != h[4]) or (score.StaffCount != (0 + h[5])) or (score.SystemStaff.BarCount != (0 + h[6])) or (('' & score.TransposingScore) != h[7])) { return Finish(score, oldPart, status, 'REFUSED', 'active score contract differs'); }
+}
+partsPath = job & '/parts.tsv';
+Sibelius.CreateTextFile(partsPath);
+partIndex = 0;
+for each part in score.DynamicParts {
+score.CurrentDynamicPart = full;
+members = CreateSparseArray();
+for each Staff st in score { if (part.IncludesStaff(st)) { members.Push(st.StaffNum); } }
+signature = members.Join(',');
+score.CurrentDynamicPart = part;
+Sibelius.AppendLineToFile(partsPath, partIndex & '|' & part.IsFullScore & '|' & Enc(score.PartName) & '|' & signature);
+partIndex = partIndex + 1;
+}
+score.CurrentDynamicPart = full;
+before = Snapshot(score);
+WriteRows(job & '/before.tsv', before);
+if (action = 'DISCOVER') { return Finish(score, oldPart, status, 'DONE', 'discovery'); }
+if (action = 'INSPECT') {
+context = FindPart(score, h[8]);
+if (IsValid(context) = False) { return Finish(score, oldPart, status, 'REFUSED', 'ambiguous or missing part'); }
+score.CurrentDynamicPart = context;
+WriteRows(job & '/context.tsv', Snapshot(score));
+return Finish(score, oldPart, status, 'DONE', 'inspection');
+}
+if (action = 'EXPORT') {
+context = FindPart(score, h[8]);
+if (IsValid(context) = False) { return Finish(score, oldPart, status, 'REFUSED', 'ambiguous or missing part'); }
+pdfPath = job & '/part.pdf';
+if (Sibelius.FileExists(pdfPath)) { return Finish(score, oldPart, status, 'REFUSED', 'PDF already exists'); }
+if (context.IsFullScore) { score.ExportScoreAsPDF(pdfPath); } else {
+chosen = CreateSparseArray(); chosen.Push(context);
+score.ExportPartsAsPDF(pdfPath, True, chosen, False);
+}
+score.CurrentDynamicPart = context;
+WriteRows(job & '/context.tsv', Snapshot(score));
+if (Sibelius.FileExists(pdfPath) = False) { return Finish(score, oldPart, status, 'FAILED', 'PDF absent'); }
+return Finish(score, oldPart, status, 'EXPORTED_UNVERIFIED', 'host must open PDF and verify snapshot');
+}
+if (score.TransposingScore = False) { return Finish(score, oldPart, status, 'REFUSED', 'enable transposing score before editing'); }
+if (Sibelius.FileExists(job & '/expected.tsv') = False) { return Finish(score, oldPart, status, 'REFUSED', 'no baseline'); }
+expected = Sibelius.ReadTextFile(job & '/expected.tsv');
+if (before.Join(Chr(10)) != JoinArray(expected, Chr(10))) { return Finish(score, oldPart, status, 'REFUSED', 'stale baseline: inspect again'); }
+if (action = 'ENSURE_PART') {
+members = SplitString(h[8], ',', False); previous = 0;
+for each member in members { n = 0 + member; if ((('' & n) != member) or (n <= previous) or (n > score.StaffCount)) { return Finish(score, oldPart, status, 'REFUSED', 'invalid staff signature'); } previous = n; }
+if ((Count(members) = 0) or (h[11] = '')) { return Finish(score, oldPart, status, 'REFUSED', 'part members/name required'); }
+found = 0;
+for each part in score.DynamicParts {
+if (part.IsFullScore = False) {
+signatureMembers = CreateSparseArray(); for each Staff st in score { if (part.IncludesStaff(st)) { signatureMembers.Push(st.StaffNum); } }
+if (signatureMembers.Join(',') = h[8]) { found = found + 1; }
+}
+}
+if (found > 1) { return Finish(score, oldPart, status, 'REFUSED', 'ambiguous existing parts'); }
+if (found = 1) { return Finish(score, oldPart, status, 'DONE', 'matching part already exists'); }
+backup = job & '/before.sib'; candidate = job & '/candidate.sib';
+if (Sibelius.FileExists(backup) or Sibelius.FileExists(candidate)) { return Finish(score, oldPart, status, 'REFUSED', 'recovery/candidate exists'); }
+score.SaveCopyAs(backup); if (Sibelius.FileExists(backup) = False) { return Finish(score, oldPart, status, 'REFUSED', 'backup absent'); }
+Sibelius.AppendLineToFile(status, 'MUTATING');
+createdPart = score.DynamicParts.CreatePartFromStaff(score.NthStaff(0 + members[0]));
+if (IsValid(createdPart) = False) { return Finish(score, oldPart, status, 'FAILED_PARTIAL', 'part creation failed'); }
+for i = 1 to Count(members) { if (createdPart.AddStaffToPart(score.NthStaff(0 + members[i])) = False) { return Finish(score, oldPart, status, 'FAILED_PARTIAL', 'part staff addition failed'); } }
+score.CurrentDynamicPart = createdPart; score.PartName = h[11];
+if ((score.PartName != h[11]) or (createdPart.StaveCount != Count(members))) { return Finish(score, oldPart, status, 'FAILED_PARTIAL', 'part identity differs'); }
+score.CurrentDynamicPart = full;
+Sibelius.AppendLineToFile(partsPath, partIndex & '|false|' & Enc(h[11]) & '|' & h[8]);
+WriteRows(job & '/after.tsv', Snapshot(score));
+score.SaveCopyAs(candidate);
+if (Sibelius.FileExists(candidate) = False) { return Finish(score, oldPart, status, 'FAILED_PARTIAL', 'candidate absent'); }
+return Finish(score, oldPart, status, 'APPLIED_UNVERIFIED', 'part created; host must verify unchanged full-score objects');
+}
+ops = CreateSparseArray();
+keys = CreateSparseArray();
+for i = 1 to Count(input) {
+rawRow = SplitString(input[i], '|', False);
+row = CreateSparseArray();
+for each rowField in rawRow { row.Push(Dec(rowField)); }
+if (Count(row) != 12) { return Finish(score, oldPart, status, 'REFUSED', 'invalid operation'); }
+
+sn = 0 + row[2]; bn = 0 + row[3]; ordinal = 0 + row[4];
+if ((sn < 0) or (sn > score.StaffCount) or (bn < 1) or (bn > score.SystemStaff.BarCount)) { return Finish(score, oldPart, status, 'REFUSED', 'target outside score'); }
+bar = GetBar(score, sn, bn);
+target = null;
+if (ordinal >= 0) {
+count = 0;
+for each item in bar { if (count = ordinal) { target = item; } count = count + 1; }
+if (IsValid(target) = False) { return Finish(score, oldPart, status, 'REFUSED', 'target absent'); }
+if (Fact(target) != row[5]) { return Finish(score, oldPart, status, 'REFUSED', 'target facts differ'); }
+key = sn & ':' & bn & ':' & ordinal;
+for each previous in keys { if (previous = key) { return Finish(score, oldPart, status, 'REFUSED', 'one operation per target per request'); } }
+keys.Push(key);
+}
+if (Allowed(row, target, bar) = False) { return Finish(score, oldPart, status, 'REFUSED', 'unsupported operation or invalid value: ' & row[1]); }
+record = CreateSparseArray(row.Slice(0), target); ops[ops.Length] = record.Slice(0);
+}
+if (ops.Length = 0) { return Finish(score, oldPart, status, 'REFUSED', 'no operations'); }
+if (action = 'PREVIEW') { return Finish(score, oldPart, status, 'PREVIEWED', 'all native targets matched; no edits'); }
+backup = job & '/before.sib'; candidate = job & '/candidate.sib';
+if (Sibelius.FileExists(backup) or Sibelius.FileExists(candidate)) { return Finish(score, oldPart, status, 'REFUSED', 'recovery or candidate already exists'); }
+score.SaveCopyAs(backup);
+if (Sibelius.FileExists(backup) = False) { return Finish(score, oldPart, status, 'REFUSED', 'backup absent'); }
+Sibelius.AppendLineToFile(status, 'MUTATING');
+for i = 0 to ops.Length {
+record = ops[i]; row = record[0]; target = record[1];
+bar = GetBar(score, 0 + row[2], 0 + row[3]);
+if (Apply(row, target, bar) = False) {
+WriteRows(job & '/after.tsv', Snapshot(score));
+return Finish(score, oldPart, status, 'FAILED_PARTIAL', 'do not save source; recover before.sib');
+}
+}
+score.CurrentDynamicPart = full;
+WriteRows(job & '/after.tsv', Snapshot(score));
+score.SaveCopyAs(candidate);
+if (Sibelius.FileExists(candidate) = False) { return Finish(score, oldPart, status, 'FAILED_PARTIAL', 'candidate absent; recover before.sib'); }
+return Finish(score, oldPart, status, 'APPLIED_UNVERIFIED', 'source remains unsaved; host must validate all observed changes');
+}
+
+Enc (value) {
+s = '' & value;
+s = utils.Replace(s, '%', '%25', True);
+s = utils.Replace(s, '|', '%7C', True);
+s = utils.Replace(s, Chr(13), '%0D', True);
+s = utils.Replace(s, Chr(10), '%0A', True);
+return s;
+}
+
+Dec (value) {
+s = '' & value;
+s = utils.Replace(s, '%0A', Chr(10), True);
+s = utils.Replace(s, '%0D', Chr(13), True);
+s = utils.Replace(s, '%7C', '|', True);
+s = utils.Replace(s, '%25', '%', True);
+return '' & s;
+}
+
+KV (key, value) {
+return '|' & key & '=' & value;
+}
+
+Fact (obj) {
+fact = 'Type=' & obj.Type & KV('Position', obj.Position) & KV('VoiceNumber', obj.VoiceNumber) & KV('Voices', obj.Voices) & KV('Hidden', obj.Hidden) & KV('CueSize', obj.CueSize) & KV('Dx', obj.Dx) & KV('Dy', obj.Dy) & KV('Magnetic', obj.UsesMagneticLayout) & KV('MagneticOverride', obj.UsesMagneticLayoutSettingOverridden);
+played = CreateSparseArray(); for pass = 1 to 10 { played.Push(obj.GetPlayedOnNthPass(pass)); }
+fact = fact & KV('Played', played.Join(','));
+if (obj.Type = 'NoteRest') {
+activeInstrument = obj.ParentBar.GetInstrumentTypeAt(obj.Position);
+fact = fact & KV('InstrumentStyle', activeInstrument.StyleId);
+fact = fact & KV('Duration', obj.Duration);
+fact = fact & KV('Grace', obj.GraceNote);
+fact = fact & KV('Slash', obj.IsAcciaccatura);
+fact = fact & KV('SingleTremolos', obj.SingleTremolos);
+fact = fact & KV('DoubleTremolos', obj.DoubleTremolos);
+fact = fact & KV('Beam', obj.Beam);
+fact = fact & KV('Stemweight', obj.Stemweight) & KV('StemFlipped', obj.StemFlipped);
+fact = fact & KV('RestPosition', obj.RestPosition);
+artics = CreateSparseArray(); for a = 0 to 16 { artics.Push(obj.GetArticulation(a)); }
+fact = fact & KV('Articulations', artics.Join(',')) & KV('NoteCount', obj.NoteCount);
+notes = CreateSparseArray();
+for each note in obj {
+noteFields = CreateSparseArray();
+noteFields.Push(note.Pitch);
+noteFields.Push(note.DiatonicPitch);
+noteFields.Push(note.WrittenPitch);
+noteFields.Push(note.WrittenDiatonicPitch);
+noteFields.Push(note.Tied);
+if (note.Tied) { noteFields.Push(note.TieStyle); } else { noteFields.Push('none'); }
+noteFields.Push(note.NoteStyle);
+noteFields.Push(note.AccidentalStyle);
+noteFields.Push(note.Hidden);
+noteFields.Push(note.Bracketed);
+noteFields.Push('unavailable');
+noteFields.Push('unavailable');
+noteFields.Push('unavailable');
+nf = noteFields.Join(',');
+notes.Push(nf);
+}
+fact = fact & KV('Notes', notes.Join(';'));
+tuplet = obj.ParentTupletIfAny;
+if (IsValid(tuplet)) { fact = fact & KV('Tuplet', tuplet.Position & ',' & tuplet.Left & ',' & tuplet.Right & ',' & tuplet.Unit & ',' & obj.PositionInTuplet); }
+}
+if (obj.Type = 'BarRest') { fact = fact & KV('RestType', obj.RestType); }
+if ((obj.Type = 'Text') or (obj.Type = 'SystemTextItem')) { fact = fact & KV('StyleId', obj.StyleId) & KV('Text', Enc(obj.Text)) & KV('Formatting', Enc(obj.TextWithFormattingAsString)) & KV('EraseBackground', obj.EraseBackground); }
+if (obj.IsALine) { fact = fact & KV('StyleId', obj.StyleId) & KV('Duration', obj.Duration) & KV('RhDx', obj.RhDx) & KV('RhDy', obj.RhDy) & KV('EndBar', obj.EndBarNumber) & KV('EndPosition', obj.EndPosition); }
+if ((obj.Type = 'SymbolItem') or (obj.Type = 'SystemSymbolItem')) { fact = fact & KV('Index', obj.Index) & KV('Size', obj.Size); }
+if (obj.Type = 'Tuplet') { fact = fact & KV('Left', obj.Left) & KV('Right', obj.Right) & KV('Unit', obj.Unit) & KV('PlayedDuration', obj.PlayedDuration) & KV('TupletStyle', obj.Style) & KV('Bracket', obj.Bracket) & KV('FullDuration', obj.FullDuration); }
+if (obj.Type = 'Tuplet') { parentTuplet = obj.ParentTupletIfAny; if (IsValid(parentTuplet)) { fact = fact & KV('ParentTuplet', parentTuplet.Position & ',' & parentTuplet.Left & ',' & parentTuplet.Right & ',' & parentTuplet.Unit & ',' & obj.PositionInTuplet); } }
+if (obj.Type = 'InstrumentChange') { fact = fact & KV('Instrument', Enc(obj.FullInstrumentName)) & KV('TextLabel', Enc(obj.TextLabel)); activeInstrument = obj.ParentBar.GetInstrumentTypeAt(obj.Position); fact = fact & KV('InstrumentStyle', activeInstrument.StyleId); }
+if (obj.Type = 'Clef') { fact = fact & KV('StyleId', obj.StyleId); }
+if (obj.Type = 'TimeSignature') { fact = fact & KV('Numerator', obj.Numerator) & KV('Denominator', obj.Denominator) & KV('TimeText', Enc(obj.Text)); }
+if (obj.Type = 'SpecialBarline') { fact = fact & KV('BarlineType', obj.BarlineType); }
+if (obj.Type = 'KeySignature') { fact = fact & KV('Sharps', obj.Sharps) & KV('Major', obj.Major); }
+return fact;
+}
+
+Snapshot (score) {
+rows = CreateSparseArray();
+Sibelius.CreateTextFile('__RUNTIME__/progress.tsv');
+contextStaffCount = score.CurrentDynamicPart.StaveCount;
+rows.Push('SCORE|' & Enc(score.Title) & '|' & Enc(score.FileName) & '|' & contextStaffCount & '|' & score.SystemStaff.BarCount & '|' & score.TransposingScore);
+for sn = 0 to contextStaffCount + 1 {
+Sibelius.AppendLineToFile('__RUNTIME__/progress.tsv', 'STAFF|' & sn);
+if (sn = 0) { st = score.SystemStaff; } else { st = score.NthStaff(sn); rows.Push('STAFF|' & sn & '|' & Enc(st.InstrumentName) & '|' & Enc(st.InitialStyleId)); }
+for bn = 1 to score.SystemStaff.BarCount + 1 {
+bar = st.NthBar(bn);
+if (sn = contextStaffCount) { Sibelius.AppendLineToFile('__RUNTIME__/progress.tsv', 'LASTBAR|' & bn); }
+if (sn = 0) { rows.Push('BAR|' & sn & '|' & bn & '|' & Enc(bar.ExternalBarNumberString) & '|' & bar.Length); } else {
+it = bar.GetInstrumentTypeAt(0);
+rows.Push('BAR|' & sn & '|' & bn & '|' & Enc(bar.ExternalBarNumberString) & '|' & bar.Length & '|' & bar.BreakType & '|' & bar.OnNthPage & '|' & bar.OnNthSystem & '|' & Enc(it.StyleId) & '|' & it.ChromaticTransposition & '|' & it.DiatonicTransposition);
+}
+ordinal = 0;
+for each obj in bar { if (sn = contextStaffCount) { Sibelius.AppendLineToFile('__RUNTIME__/progress.tsv', 'LASTOBJ|' & bn & '|' & ordinal & '|' & obj.Type); } rows.Push('OBJ|' & sn & '|' & bn & '|' & ordinal & '|' & Enc(Fact(obj))); ordinal = ordinal + 1; }
+}
+}
+Sibelius.AppendLineToFile('__RUNTIME__/progress.tsv', 'SNAPSHOT_COMPLETE');
+return rows;
+}
+
+GetBar (score, sn, bn) {
+if (sn = 0) { return score.SystemStaff.NthBar(bn); }
+return score.NthStaff(sn).NthBar(bn);
+}
+
+FindPart (score, wanted) {
+selector = SplitString(wanted, '#', False); signatureWanted = selector[0]; selectedIndex = -1;
+if (Count(selector) = 2) { selectedIndex = 0 + selector[1]; }
+full = null; for each part in score.DynamicParts { if (part.IsFullScore) { full = part; } }
+score.CurrentDynamicPart = full;
+match = null; matches = 0; partNumber = 0;
+for each part in score.DynamicParts {
+members = CreateSparseArray();
+for each Staff st in score { if (part.IncludesStaff(st)) { members.Push(st.StaffNum); } }
+sig = members.Join(',');
+if (((signatureWanted = 'score') and part.IsFullScore) or ((signatureWanted = sig) and (part.IsFullScore = False) and ((selectedIndex = -1) or (selectedIndex = partNumber)))) { match = part; matches = matches + 1; }
+partNumber = partNumber + 1;
+}
+if (matches != 1) { return null; }
+return match;
+}
+
+WriteRows (path, rows) {
+Sibelius.AppendLineToFile('__RUNTIME__/progress.tsv', 'RETURN_ROWS|' & path);
+pathFields = SplitString(path, '/', False);
+name = pathFields[Count(pathFields) - 1];
+result = Self._property:output;
+result[name] = rows;
+Self._property:output = result;
+Sibelius.AppendLineToFile('__RUNTIME__/progress.tsv', 'RETURN_ROWS_STORED');
+}
+
+Fail (status, code, message) {
+Sibelius.AppendLineToFile(status, code & '|' & Enc(message)); return False;
+}
+
+Finish (score, oldPart, status, code, message) {
+score.CurrentDynamicPart = oldPart;
+Fail(status, code, message);
+return Self._property:output;
+}
+
+Allowed (row, target, bar) {
+op = row[6]; key = row[7]; val = row[8];
+if (op = 'ADD_TEXT') { return ((0 + row[4]) = -1) and ((0 + row[9]) >= 0) and ((0 + row[9]) < bar.Length) and ((0 + row[10]) >= 0) and ((0 + row[10]) <= 4); }
+if (op = 'ADD_LINE') { return ((0 + row[4]) = -1) and ((0 + row[9]) >= 0) and ((0 + row[9]) < bar.Length) and ((0 + val) > 0); }
+if (op = 'ADD_SYMBOL') { return ((0 + row[4]) = -1) and ((0 + row[9]) >= 0) and ((0 + row[9]) < bar.Length); }
+if (op = 'REPLACE_VOICE') {
+if (((0 + row[4]) != -1) or ((0 + key) < 1) or ((0 + key) > 4) or (Sibelius.FileExists(val) = False)) { return False; }
+for each item in bar { if ((item.Type = 'Slur') and (item.VoiceNumber = 0)) { return False; } }
+recipe = ReadRecipe(val); return recipe.Length > 0;
+}
+if (IsValid(target) = False) { return False; }
+if (op = 'DELETE') { return target.IsALine or (target.Type = 'Text') or (target.Type = 'SystemTextItem') or (target.Type = 'SymbolItem') or (target.Type = 'SystemSymbolItem'); }
+if (op = 'PITCH') { return (target.Type = 'NoteRest') and ((0 + row[9]) >= 0) and ((0 + row[9]) < target.NoteCount) and ((0 + row[11]) >= 0) and ((0 + row[11]) <= 127); }
+if (op = 'ARTICULATION') { return (target.Type = 'NoteRest') and ((0 + key) >= 0) and ((0 + key) <= 15) and ((val = '0') or (val = '1')); }
+if (op = 'NOTE_SET') {
+if ((target.Type != 'NoteRest') or ((0 + row[9]) < 0) or ((0 + row[9]) >= target.NoteCount)) { return False; }
+return (key = 'Tied') or (key = 'TieStyle') or (key = 'NoteStyle') or (key = 'AccidentalStyle') or (key = 'Hidden') or (key = 'Bracketed');
+}
+if (op = 'SET') {
+if ((key = 'Dx') or (key = 'Dy') or (key = 'Hidden') or (key = 'CueSize') or (key = 'Magnetic')) { return True; }
+if ((key = 'Text') or (key = 'StyleId') or (key = 'EraseBackground')) { return (target.Type = 'Text') or (target.Type = 'SystemTextItem'); }
+if ((key = 'Duration') or (key = 'RhDx') or (key = 'RhDy')) { return target.IsALine; }
+if ((key = 'SingleTremolos') or (key = 'DoubleTremolos')) { return (target.Type = 'NoteRest') and (target.NoteCount > 0); }
+if (key = 'RestPosition') { return (target.Type = 'NoteRest') and (target.NoteCount = 0); }
+if (key = 'Beam') { return target.Type = 'NoteRest'; }
+if (key = 'Size') { return (target.Type = 'SymbolItem') or (target.Type = 'SystemSymbolItem'); }
+if ((key = 'Bracket') or (key = 'FullDuration') or (key = 'TupletStyle')) { return target.Type = 'Tuplet'; }
+}
+return False;
+}
+
+Apply (row, target, bar) {
+op = row[6]; key = row[7]; val = row[8]; number = 0 + val;
+if (op = 'REPLACE_VOICE') { return ReplaceVoice(bar, 0 + key, val); }
+if (op = 'ADD_TEXT') { created = bar.AddText(0 + row[9], val, key, 0 + row[10]); return IsValid(created); }
+if (op = 'ADD_LINE') { created = bar.AddLine(0 + row[9], number, key, 0, 0, 0 + row[10], False); if (IsValid(created)) { if ((0 + row[10]) = 0) { created.SetAllVoices(); } else { created.SetVoice(0 + row[10], True); } for pass = 1 to 10 { created.SetPlayedOnNthPass(pass, (0 + row[11]) = 1); } return True; } return False; }
+if (op = 'ADD_SYMBOL') { created = bar.AddSymbol(0 + row[9], 0 + key); if (IsValid(created)) { created.Size = number; return True; } return False; }
+if (op = 'DELETE') { target.Delete(); return True; }
+if (op = 'PITCH') {
+note = target[0 + row[9]];
+if (((0 + key) = 0) and ((0 + row[11]) < note.WrittenPitch)) {
+delta = (0 + row[11]) - note.WrittenPitch;
+if (note.Pitch >= 2) { intermediate = note.Transpose(-1, IntervalMajor, True); if (IsValid(intermediate) = False) { return False; } changed = intermediate.Transpose(1, 5 + delta, True); } else {
+intermediate = note.Transpose(1, IntervalMajor, True); if (IsValid(intermediate) = False) { return False; } changed = intermediate.Transpose(-1, 5 - delta, True);
+}
+} else { changed = note.Transpose(0 + key, number, True); }
+return IsValid(changed) and (changed.WrittenPitch = (0 + row[11])) and (changed.WrittenDiatonicPitch = (0 + row[10]));
+}
+if (op = 'ARTICULATION') { target.SetArticulation(0 + key, number = 1); return target.GetArticulation(0 + key) = (number = 1); }
+if (op = 'NOTE_SET') {
+note = target[0 + row[9]];
+if (key = 'Tied') { note.Tied = number = 1; }
+if (key = 'TieStyle') { note.TieStyle = val; }
+if (key = 'NoteStyle') { note.NoteStyle = number; }
+if (key = 'AccidentalStyle') { note.AccidentalStyle = number; }
+if (key = 'Hidden') { note.Hidden = number = 1; }
+if (key = 'Bracketed') { note.Bracketed = number = 1; }
+if (key = 'LvTie') { note.LvTie = number = 1; }
+if (key = 'TiedInto') { note.TiedInto = number = 1; }
+if (key = 'TieIntoStyle') { note.TieIntoStyle = val; }
+return True;
+}
+if (key = 'Dx') { target.Dx = number; }
+if (key = 'Dy') { target.Dy = number; }
+if (key = 'Hidden') { target.Hidden = number = 1; }
+if (key = 'CueSize') { target.CueSize = number = 1; }
+if (key = 'Magnetic') { if (number = 1) { target.UsesMagneticLayout = AlwaysDodge; } else { target.UsesMagneticLayout = SuppressDodge; } }
+if (key = 'Text') { target.Text = val; }
+if (key = 'StyleId') { target.StyleId = val; }
+if (key = 'EraseBackground') { target.EraseBackground = number = 1; }
+if (key = 'Duration') { target.Duration = number; }
+if (key = 'RhDx') { target.RhDx = number; }
+if (key = 'RhDy') { target.RhDy = number; }
+if (key = 'SingleTremolos') { target.SingleTremolos = number; }
+if (key = 'DoubleTremolos') { target.DoubleTremolos = number; }
+if (key = 'Beam') { target.Beam = number; }
+if (key = 'RestPosition') { target.RestPosition = number; }
+if (key = 'Size') { target.Size = number; }
+if (key = 'Bracket') { target.Bracket = number; }
+if (key = 'FullDuration') { target.FullDuration = number = 1; }
+if (key = 'TupletStyle') { target.Style = number; }
+return True;
+}
+
+JoinArray (items, separator) {
+return JoinStrings(items, separator);
+}

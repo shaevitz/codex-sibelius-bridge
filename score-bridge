@@ -1,0 +1,13 @@
+#!/bin/zsh
+set -eu
+bridge_dir="${0:A:h}"
+runtime_dir="${HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies"
+bridge_python="${runtime_dir}/python/bin/python3"
+bridge_node="${runtime_dir}/node/bin/node"
+[[ -x "$bridge_python" ]] || bridge_python="$(command -v python3)"
+[[ ! -x "${bridge_dir}/.venv/bin/python" ]] || bridge_python="${bridge_dir}/.venv/bin/python"
+[[ -x "$bridge_node" ]] || bridge_node="$(command -v node)"
+if [[ "${1:-}" == start ]]; then
+  exec "$bridge_node" "$bridge_dir/connection_daemon.mjs"
+fi
+exec "$bridge_python" "$bridge_dir/score_bridge.py" "$@"

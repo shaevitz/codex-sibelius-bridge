@@ -1,0 +1,11 @@
+runtime/
+install-history/
+__pycache__/
+.venv/
+.DS_Store
+*.sib
+*.pdf
+*.musicxml
+*.mxl
+*.mid
+*.plg

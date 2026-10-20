@@ -1,0 +1,140 @@
+ReadRecipe (path) {
+result = CreateSparseArray();
+source = Sibelius.ReadTextFile(path);
+for each line in source {
+fields = SplitString(line, '|', False); row = CreateSparseArray();
+for each field in fields { row.Push('' & Dec(field)); }
+if (row.Length != 12) { return CreateSparseArray(); }
+result[result.Length] = row.Slice(0);
+}
+return result;
+}
+
+Value (fact, wanted) {
+fields = SplitString(fact, '|', False);
+for each field in fields {
+pair = SplitString(field, '=', False);
+if (pair[0] = wanted) { return Dec(pair[1]); }
+}
+return '';
+}
+
+RestoreBase (obj, facts) {
+if (obj.Dx != (0 + Value(facts, 'Dx'))) { obj.Dx = 0 + Value(facts, 'Dx'); }
+if (obj.Dy != (0 + Value(facts, 'Dy'))) { obj.Dy = 0 + Value(facts, 'Dy'); }
+if (obj.Hidden != (Value(facts, 'Hidden') = 'true')) { obj.Hidden = Value(facts, 'Hidden') = 'true'; }
+if (obj.CueSize != (Value(facts, 'CueSize') = 'true')) { obj.CueSize = Value(facts, 'CueSize') = 'true'; }
+if (obj.Voices != (0 + Value(facts, 'Voices'))) { obj.Voices = 0 + Value(facts, 'Voices'); }
+if ((obj.UsesMagneticLayoutSettingOverridden != (Value(facts, 'MagneticOverride') = 'true')) or (obj.UsesMagneticLayout != (Value(facts, 'Magnetic') = 'true'))) {
+if (Value(facts, 'MagneticOverride') = 'false') { obj.UsesMagneticLayout = DefaultDodge; } else { if (Value(facts, 'Magnetic') = 'true') { obj.UsesMagneticLayout = AlwaysDodge; } else { obj.UsesMagneticLayout = SuppressDodge; } }
+}
+passes = SplitString(Value(facts, 'Played'), ',', False);
+for p = 0 to 9 { if (obj.GetPlayedOnNthPass(p + 1) != (passes[p] = 'true')) { obj.SetPlayedOnNthPass(p + 1, passes[p] = 'true'); } }
+return True;
+}
+
+RestoreNote (note, fields) {
+note.Tied = fields[4] = 'true';
+if (note.Tied) { note.TieStyle = fields[5]; }
+note.NoteStyle = 0 + fields[6]; note.AccidentalStyle = 0 + fields[7];
+note.Hidden = fields[8] = 'true'; note.Bracketed = fields[9] = 'true';
+// These optional getters are unavailable in the installed native API; do not invent values.
+return (note.Pitch = (0 + fields[0])) and (note.DiatonicPitch = (0 + fields[1])) and (note.WrittenPitch = (0 + fields[2])) and (note.WrittenDiatonicPitch = (0 + fields[3]));
+}
+
+ReplaceVoice (bar, voice, path) {
+rhythmStaff = bar.ParentStaff; rhythmBarNumber = bar.BarNumber;
+recipe = ReadRecipe(path);
+Sibelius.CreateTextFile('__RUNTIME__/rhythm-progress.tsv');
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'READ_RECIPE');
+if (recipe.Length = 0) { return False; }
+// ClearNotesAndModifiers removes slurs in this voice: retain their complete observed facts.
+slurs = CreateSparseArray();
+for each item in bar {
+if ((item.Type = 'Slur') and (item.VoiceNumber = voice)) { slurs.Push(Fact(item)); }
+if ((item.Type = 'Slur') and (item.VoiceNumber = 0)) { return False; }
+}
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'CLEAR_VOICE');
+bar.ClearNotesAndModifiers(voice);
+bar = rhythmStaff.NthBar(rhythmBarNumber);
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'CLEARED');
+handles = CreateDictionary();
+for each row in recipe {
+kind = row[0]; id = row[1]; parent = row[2]; pos = 0 + row[3];
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', kind & '|' & id & '|' & pos);
+if (kind = 'T') {
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'ARGS|' & voice & '|' & row[4] & '|' & row[5] & '|' & row[6] & '|' & row[7] & '|' & row[8] & '|' & row[9] & '|BAR|' & bar.Length);
+if (parent = '') {
+created = bar.AddTuplet(pos, voice, 0 + row[4], 0 + row[5], 0 + row[6], '' & row[7], '' & row[8], row[9] = 'true');
+} else {
+container = handles[parent]; if (IsValid(container) = False) { return False; } created = container.AddNestedTuplet(pos, 0 + row[4], 0 + row[5], 0 + row[6], '' & row[7], '' & row[8], row[9] = 'true');
+}
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'TUPLET_RETURNED');
+if (IsValid(created) = False) { return False; }
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'TUPLET_VALID');
+handles[id] = created;
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'RESTORE_TUPLET');
+RestoreBase(created, row[10]);
+} else {
+notes = SplitString(row[5], ';', True);
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'NOTES_SPLIT|' & Count(notes));
+if (Count(notes) = 0) { pitch = 60; dia = 35; tied = False; } else {
+fields = SplitString(notes[0], ',', False); pitch = 0 + fields[0]; dia = 0 + fields[1]; tied = fields[4] = 'true';
+}
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'NOTES_PARSED');
+if (row[7] != '') {
+anchor = handles[row[7]];
+if (IsValid(anchor) = False) { return False; }
+if (row[8] = 'true') { note = anchor.AddAcciaccaturaBefore(pitch, 0 + row[4], tied, voice, dia); } else { note = anchor.AddAppoggiaturaBefore(pitch, 0 + row[4], tied, voice, dia); }
+} else {
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'NOTE_ARGS|' & pos & '|' & pitch & '|' & row[4] & '|' & tied & '|' & voice & '|' & dia & '|parent=' & parent);
+if (parent = '') { note = bar.AddNote(pos, pitch, 0 + row[4], tied, voice, dia); } else { container = handles[parent]; if (IsValid(container) = False) { return False; } note = container.AddNote(pos, pitch, 0 + row[4], tied, dia); }
+}
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'NOTE_RETURNED');
+if (IsValid(note) = False) { return False; }
+nr = note.ParentNoteRest; handles[id] = nr;
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'NOTE_ADDED');
+if (Count(notes) = 0) { nr.Delete(); } else {
+if (RestoreNote(note, fields) = False) { return False; }
+noteTotal = Count(notes); n = 1;
+while (n < noteTotal) {
+fields = SplitString(notes[n], ',', False);
+if (Count(fields) != 13) { return False; }
+note = nr.AddNote(0 + fields[0], fields[4] = 'true', 0 + fields[1]);
+if (IsValid(note) = False) { return False; }
+if (RestoreNote(note, fields) = False) { return False; }
+n = n + 1;
+}
+}
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'RESTORE_EVENT');
+RestoreBase(nr, row[6]);
+if (nr.StemFlipped != (Value(row[6], 'StemFlipped') = 'true')) { nr.FlipStem(); }
+if (nr.NoteCount = 0) { if (nr.RestPosition != (0 + Value(row[6], 'RestPosition'))) { nr.RestPosition = 0 + Value(row[6], 'RestPosition'); } } else {
+if (nr.SingleTremolos != (0 + Value(row[6], 'SingleTremolos'))) { nr.SingleTremolos = 0 + Value(row[6], 'SingleTremolos'); }
+if (nr.DoubleTremolos != (0 + Value(row[6], 'DoubleTremolos'))) { nr.DoubleTremolos = 0 + Value(row[6], 'DoubleTremolos'); }
+}
+artics = SplitString(Value(row[6], 'Articulations'), ',', False);
+for a = 0 to 16 { if (nr.GetArticulation(a) != (artics[a] = 'true')) { nr.SetArticulation(a, artics[a] = 'true'); } }
+Sibelius.AppendLineToFile('__RUNTIME__/rhythm-progress.tsv', 'EVENT_DONE');
+}
+}
+// Later additions can re-beam earlier notes. Restore graces first, then ordinary notes.
+for beamPhase = 0 to 2 {
+for each row in recipe {
+if (row[0] = 'E') {
+isGrace = Value(row[6], 'Grace') = 'true';
+if (((beamPhase = 0) and isGrace) or ((beamPhase = 1) and (isGrace = False))) {
+nr = handles[row[1]]; if (IsValid(nr) = False) { return False; }
+nr.Beam = 0 + Value(row[6], 'Beam');
+if (nr.StemFlipped != (Value(row[6], 'StemFlipped') = 'true')) { nr.FlipStem(); }
+}
+}
+}
+}
+for each sf in slurs {
+slur = bar.AddLine(0 + Value(sf, 'Position'), 0 + Value(sf, 'Duration'), Value(sf, 'StyleId'), 0 + Value(sf, 'Dx'), 0 + Value(sf, 'Dy'), voice, Value(sf, 'Hidden') = 'true');
+if (IsValid(slur) = False) { return False; }
+RestoreBase(slur, sf); slur.RhDx = 0 + Value(sf, 'RhDx'); slur.RhDy = 0 + Value(sf, 'RhDy');
+}
+return True;
+}
