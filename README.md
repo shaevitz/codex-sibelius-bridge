@@ -1,6 +1,6 @@
-# Sibelius Score Bridge
+# Codex Score Bridge for Sibelius
 
-A local bridge for inspecting, exporting and editing native Sibelius scores from an AI coding assistant or a terminal. It combines a ManuScript plugin with a Python controller and a Node.js connection to Sibelius Connect. Musical edits use Sibelius's native objects; no mouse automation or MusicXML round-trip is required.
+A local bridge that lets Codex inspect, export and edit native Sibelius scores through Sibelius Connect. It also provides a terminal interface. It combines a ManuScript plugin with a Python controller and a Node.js connection to Sibelius Connect. Musical edits use Sibelius's native objects; no mouse automation or MusicXML round-trip is required.
 
 Independent experimental software. Not affiliated with, endorsed by, or supported by Avid or OpenAI. A separately licensed installation of Sibelius is required. This is a source-code release, not an official directory or marketplace listing. See [Avid and licensing](LEGAL.md).
 
@@ -12,7 +12,7 @@ Independent experimental software. Not affiliated with, endorsed by, or supporte
 - Rebuild one complete bar/voice from an explicit recipe containing notes, rests, chords, tuplets and grace notes.
 - Save separate native recovery and candidate files; compare all observed score objects with the expected changes.
 
-The bridge does not contain a model or automatically judge musical correctness. An assistant must compare the exported PDF with an authorized reference, establish the intended correction, use exact native targets, and review the corrected PDF. Codex is one possible client; the command-line interface is not tied to one model provider.
+The bridge does not contain a model or automatically judge musical correctness. An assistant must compare the exported PDF with an authorized reference, establish the intended correction, use exact native targets, and review the corrected PDF. Developed for use with Codex; the command-line interface can also be used by other assistants and is not tied to one model provider.
 
 ## Musical scope
 
@@ -41,8 +41,8 @@ Sibelius and its bundled `utils` plugin are runtime dependencies; neither is dis
 ## Install
 
 ```sh
-git clone https://github.com/shaevitz/sibelius-score-bridge.git
-cd sibelius-score-bridge
+git clone https://github.com/shaevitz/codex-sibelius-bridge.git
+cd codex-sibelius-bridge
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ./score-bridge install
