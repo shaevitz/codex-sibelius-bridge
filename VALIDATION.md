@@ -10,3 +10,5 @@ Development native testing on macOS with Sibelius 2025.12.1 completed on October
 - Rendered smoke checks confirmed visible grace, tuplet and chord output. The extracts had existing/trimmed-heading overlaps; these tests were not publication engraving certification or a full musical source audit.
 
 The public source package removes the private fixture helper and project-specific paths. Its synthetic tests and installer generation are checked separately; this packaging is not a native acceptance run on every supported-looking API combination or Sibelius version. Nested tuplets, optional APIs, full playback fidelity, and Windows remain unverified or excluded as described in the README.
+
+Musical scope is brass-band instruments and percussion. Tests establish ordinary multi-note chord support, not chord symbols/diagrams. Lyrics, vocal underlay, bowing/fingering, string harmonics, tablature and other specialist notation were not validated and are not promised to survive a complete-voice rebuild.

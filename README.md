@@ -14,6 +14,22 @@ Independent experimental software. Not affiliated with, endorsed by, or supporte
 
 The bridge does not contain a model or automatically judge musical correctness. An assistant must compare the exported PDF with an authorized reference, establish the intended correction, use exact native targets, and review the corrected PDF. Codex is one possible client; the command-line interface is not tied to one model provider.
 
+## Musical scope
+
+Developed for **brass-band instruments and percussion**, and validated on that repertoire. General note/rest/chord, text, articulation, line and symbol primitives may be useful elsewhere, but this is not a general-purpose editor for every Sibelius notation feature.
+
+| Area | Status |
+| --- | --- |
+| Brass-band notes, rests, transposing written pitches, dynamics and common articulations | Targeted and tested |
+| Percussion noteheads and the tested tremolo/notation operations | Targeted and tested; not a complete percussion-map editor |
+| Ordinary chords (multiple simultaneous noteheads) | Supported; chord-head editing and two-head brass-chord rebuilding tested |
+| Chord symbols such as Cmaj7, guitar chord diagrams | No dedicated support or validation |
+| Lyrics and vocal underlay | No dedicated support or validation |
+| Strings, bowing/fingering, harmonics, tablature, guitar techniques, pedal/harp notation | Outside the tested scope; no preservation guarantee |
+| Nested tuplet combinations, specialized engraving and live playback | Limited or unverified; see validation notes |
+
+A generic symbol or text command is not semantic support for specialist notation. Unsupported properties may be absent from the inventory and may be lost during complete-voice rebuilding. Use disposable copies and source-specific validation before working outside the tested brass/percussion scope. In particular, do not treat the voice-rebuild operation as safe for lyrics, tablature, string-specific properties or other unobserved attachments.
+
 ## Requirements
 
 - macOS and a licensed Sibelius installation supporting ManuScript and Sibelius Connect. The native development build was tested with Sibelius 2025.12.1 on macOS; other versions and Windows are unverified.
@@ -107,7 +123,7 @@ Run the synthetic controller tests without Sibelius:
 .venv/bin/python -m unittest discover -p 'test_*.py' -v
 ```
 
-[VALIDATION.md](VALIDATION.md) summarizes native development testing. Private score files, PDFs, inventories, logs and score-specific acceptance scripts are intentionally excluded from this release. No copyrighted music examples or Avid manuals are included.
+[VALIDATION.md](VALIDATION.md) summarizes native development testing. Private score files, PDFs, inventories, logs and score-specific acceptance scripts are intentionally excluded from this release. No copyrighted music examples or Avid manuals are included. There are no hardcoded personal home paths, score titles, model preferences, credentials or private review logs. The author attribution and GitHub repository address identify the project owner; they are not runtime configuration.
 
 Optional L.V./incoming-tie API getters are unavailable in the tested Sibelius build, so their corresponding edits are excluded. Nested tuplets are implemented but nested combinations need a disposable validation case before use. General instrument replacement, score restructuring, lyrics and arbitrary native code execution are not exposed. Graphical edits run in full-score context; part-only isolation is not claimed. Voice rebuilding does not certify full MIDI/live-playback fidelity.
 

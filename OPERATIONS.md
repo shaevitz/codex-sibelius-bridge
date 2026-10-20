@@ -1,5 +1,7 @@
 # Editing operations
 
+Designed and tested for brass-band/percussion work. Ordinary notehead chords are supported; chord symbols/diagrams, lyrics, string-specific notation and other specialist attachments are outside the validated scope. See the musical-scope table in the README before rebuilding a voice.
+
 Every request identifies the exact active score filename, title, staff count, bar count, and transposing-score state. Edits additionally compare the entire observed full-score snapshot with their baseline. Object edits include their exact pre-edit facts. One operation per existing object per request prevents invalidated references from being reused after pitch changes; complete-voice rebuilds run alone. All targets are preflighted before mutation. Musical edits take place in full-score context, and the previous dynamic-part context is restored on normal exits. Graphical edits therefore may affect parts as well as the full score; no part-only isolation is claimed.
 
 Supported operation kinds:
