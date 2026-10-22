@@ -14,6 +14,8 @@ Independent experimental software. Not affiliated with, endorsed by, or supporte
 
 The bridge does not contain a model or automatically judge musical correctness. An assistant must compare the exported PDF with an authorized reference, establish the intended correction, use exact native targets, and review the corrected PDF. Developed for use with Codex; the command-line interface can also be used by other assistants and is not tied to one model provider.
 
+Version **1.2.0** adds independent-bar rhythm batches, grace-position restoration, direct part switching, guarded multi-part export, fast PDF-only proof export, and local status/longer waits. See [CHANGELOG.md](CHANGELOG.md) and the [review workflow](WORKFLOW.md).
+
 ## Musical scope
 
 Developed for **brass-band instruments and percussion**, and validated on that repertoire. General note/rest/chord, text, articulation, line and symbol primitives may be useful elsewhere, but this is not a general-purpose editor for every Sibelius notation feature.
@@ -98,9 +100,32 @@ This is a format example, not a correction to run blindly. Written pitch uses MI
 ./score-bridge apply --baseline JOB --operations edits.json --run
 ```
 
-Use the same unmodified baseline for preview and apply. Apply compares the entire observed native score with that baseline, checks every target before mutation, writes `before.sib`, makes the edits, writes `candidate.sib`, and verifies the full observed result. The original file is not automatically overwritten. One operation per existing object is allowed per request; complete-voice rebuilding runs alone. Re-export and visually verify a candidate before making it your working score.
+Native preview is optional for an established operation; apply already preflights all targets before mutation. If you run a preview, use the same unmodified baseline for apply. Apply compares the entire observed native score with that baseline, checks every target before mutation, writes `before.sib`, makes the edits, writes `candidate.sib`, and verifies the full observed result. The original file is not automatically overwritten. One operation per existing object is allowed per request. Independent complete-voice rebuilds can share a rhythm-only batch when their staff/bar pairs differ; ordinary edits stay in separate batches. Re-export and visually verify a candidate before making it your working score.
 
 Operation details are in [OPERATIONS.md](OPERATIONS.md).
+
+## Faster part review
+
+```sh
+./score-bridge show-part --score /absolute/path/example.sib --part 1,2
+./score-bridge export-set --baseline JOB --part '1;2,3;4' --run
+./score-bridge export-proof --baseline JOB --part '1;2,3;4' --run
+./score-bridge status JOB
+```
+
+`export-set` takes one shared full-score inventory and checks it against the baseline, instead of scanning separately for every PDF. It omits per-part object contexts.
+
+`export-proof` exports current PDFs with the same score-identity and part-selection checks but **takes no musical snapshot**. It validates PDF readability, page counts and hashes. Its result explicitly says `musical_state_verified: false` and `baseline_usable: false`; it cannot be used as an edit baseline. Use it for repeated visual proofs after a guarded edit. It does not prove the current score still matches the earlier baseline. If you edited outside the bridge, establish the necessary native preservation evidence separately.
+
+Requests wait up to 1,800 seconds by default; adjust with `--timeout SECONDS` on a running command. A wait timeout does not cancel the native request. `status` reads local state and daemon liveness without invoking Sibelius; `collect` checks the original result. Never resubmit a timed-out edit.
+
+For metadata-independent page comparison, install the optional dependencies in `requirements-proof.txt` and Poppler's `pdftoppm`, then run:
+
+```sh
+python compare_part_pdfs.py before.pdf after.pdf --output comparison.json
+```
+
+An identical rendered page can carry forward its prior visual proof at that rendering resolution. A changed page requires inspection; a pixel comparison is not a pitch/rhythm analyzer. See [WORKFLOW.md](WORKFLOW.md) for the complete process and limitations.
 
 ## Recovery
 
@@ -125,7 +150,7 @@ Run the synthetic controller tests without Sibelius:
 
 [VALIDATION.md](VALIDATION.md) summarizes native development testing. Private score files, PDFs, inventories, logs and score-specific acceptance scripts are intentionally excluded from this release. No copyrighted music examples or Avid manuals are included. There are no hardcoded personal home paths, score titles, model preferences, credentials or private review logs. The author attribution and GitHub repository address identify the project owner; they are not runtime configuration.
 
-Optional L.V./incoming-tie API getters are unavailable in the tested Sibelius build, so their corresponding edits are excluded. Nested tuplets are implemented but nested combinations need a disposable validation case before use. General instrument replacement, score restructuring, lyrics and arbitrary native code execution are not exposed. Graphical edits run in full-score context; part-only isolation is not claimed. Voice rebuilding does not certify full MIDI/live-playback fidelity.
+Optional L.V./incoming-tie API getters are unavailable in the tested Sibelius build, so their corresponding edits are excluded. Nested tuplets are implemented but nested combinations need a disposable validation case before use. General instrument replacement, score restructuring, lyrics and arbitrary native code execution are not exposed. Full-score graphical edits may affect dynamic parts. Narrow part-only overrides have separate full-score and part guards; see OPERATIONS.md. Voice rebuilding does not certify full MIDI/live-playback fidelity.
 
 ## License
 

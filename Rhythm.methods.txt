@@ -136,5 +136,16 @@ slur = bar.AddLine(0 + Value(sf, 'Position'), 0 + Value(sf, 'Duration'), Value(s
 if (IsValid(slur) = False) { return False; }
 RestoreBase(slur, sf); slur.RhDx = 0 + Value(sf, 'RhDx'); slur.RhDy = 0 + Value(sf, 'RhDy');
 }
+// Adding later graces and restoring beams can recalculate earlier grace offsets.
+// Commit their declared graphic positions only after the complete voice is stable.
+for each row in recipe {
+if ((row[0] = 'E') and (Value(row[6], 'Grace') = 'true')) {
+nr = handles[row[1]]; if (IsValid(nr) = False) { return False; }
+if (nr.Dx != (0 + Value(row[6], 'Dx'))) { nr.Dx = 0 + Value(row[6], 'Dx'); }
+if (nr.Dy != (0 + Value(row[6], 'Dy'))) { nr.Dy = 0 + Value(row[6], 'Dy'); }
+if ((nr.Dx != (0 + Value(row[6], 'Dx'))) or (nr.Dy != (0 + Value(row[6], 'Dy')))) { return False; }
+}
+}
+
 return True;
 }

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -21,9 +22,10 @@ import uuid
 
 from rhythm import extract_recipe, validate_recipe
 
-ROOT = Path(__file__).absolute().parent
+# Installation and imports through a symlink must generate the same native build.
+ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / 'runtime'
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 NOTE_FIELDS = ('Pitch', 'DiatonicPitch', 'WrittenPitch', 'WrittenDiatonicPitch',
                'Tied', 'TieStyle', 'NoteStyle', 'AccidentalStyle', 'Hidden',
                'Bracketed', 'LvTie', 'TiedInto', 'TieIntoStyle')
@@ -34,6 +36,39 @@ INT_RANGES = {'Dx': (-32768, 32767), 'Dy': (-32768, 32767),
               'DoubleTremolos': (0, 7), 'Beam': (0, 20),
               'RestPosition': (-1000, 1000), 'Size': (0, 3),
               'Bracket': (0, 2), 'TupletStyle': (0, 4)}
+
+
+MUSIC_TEXT_PREFIX = chr(92) + 'i' + chr(92) * 2 + 'ctext.character.musictext' + chr(92)
+BOLD_ROMAN_PREFIX = chr(92) + 'B' + chr(92) * 2 + 'i' + chr(92)
+
+
+def music_dynamic(text):
+    """Use the score's native music-text character style for dynamic glyphs."""
+    if not isinstance(text, str) or not re.fullmatch(r'[fmpnrsz]{1,12}', text):
+        raise ValueError('Music-text dynamics require only dynamic glyph letters')
+    return MUSIC_TEXT_PREFIX + text
+
+
+def dynamic_plain(value):
+    if value.startswith(MUSIC_TEXT_PREFIX):
+        text = value[len(MUSIC_TEXT_PREFIX):]
+        music_dynamic(text)
+        return text
+    return None
+
+
+def bold_roman(text):
+    if not isinstance(text, str) or not text or '\\' in text or any(ord(c) < 32 for c in text):
+        raise ValueError('Bold Roman prose must be nonempty plain text')
+    return BOLD_ROMAN_PREFIX + text
+
+
+def formatted_plain(value):
+    if value.startswith(BOLD_ROMAN_PREFIX):
+        text = value[len(BOLD_ROMAN_PREFIX):]
+        bold_roman(text)
+        return text
+    return dynamic_plain(value)
 
 
 def enc(value):
@@ -119,7 +154,7 @@ def transpose_interval(old_pitch, old_dia, new_pitch, new_dia):
 def compile_operation(op, snap):
     allowed_fields = {'id', 'op', 'staff', 'bar', 'ordinal', 'property', 'value',
                       'note', 'written_pitch', 'written_diatonic', 'position',
-                      'voice', 'style', 'duration', 'text', 'symbol', 'size', 'playback', 'recipe'}
+                      'voice', 'style', 'duration', 'text', 'symbol', 'size', 'playback', 'recipe', 'music_text'}
     unknown = set(op) - allowed_fields
     if unknown:
         raise ValueError(f'Unknown operation fields: {sorted(unknown)}')
@@ -128,6 +163,8 @@ def compile_operation(op, snap):
     sn = strict_int(op['staff'], 0, int(snap['score'][3]), 'staff')
     bn = strict_int(op['bar'], 1, int(snap['score'][4]), 'bar')
     kind = op['op']
+    if 'music_text' in op and (kind != 'ADD_TEXT' or not isinstance(op['music_text'], bool)):
+        raise ValueError('music_text is a Boolean option for ADD_TEXT only')
     ordinal = strict_int(op.get('ordinal', -1), -1, 100000, 'ordinal')
     target = snap['objects'].get((sn, bn, ordinal))
     row = ['OP', op['id'], sn, bn, ordinal, '', kind, '', '', '', '', '']
@@ -155,7 +192,12 @@ def compile_operation(op, snap):
             prefix = 'text.system.' if sn == 0 else 'text.staff.'
             if not style.startswith(prefix):
                 raise ValueError('Text style must match staff/system attachment')
-            row[7:9] = [style, op['text']]
+            text = op['text']
+            if op.get('music_text', False):
+                if style != 'text.staff.expression':
+                    raise ValueError('Music-text dynamics require expression style')
+                text = music_dynamic(text)
+            row[7:9] = [style, text]
         elif kind == 'ADD_LINE':
             if not op['style'].startswith('line.staff.') or sn == 0:
                 raise ValueError('Only staff lines are supported; structure is settled')
@@ -188,6 +230,8 @@ def compile_operation(op, snap):
             value = strict_int(value, *INT_RANGES[prop], prop)
         elif not isinstance(value, str):
             raise ValueError('Text/style must be a string')
+        if prop == 'Text':
+            formatted_plain(value)  # Validate our supported native formatting prefixes.
         row[7:9] = [prop, value]
     elif kind == 'ARTICULATION':
         if target['Type'] != 'NoteRest':
@@ -269,6 +313,32 @@ def resolve_job(job):
     return p
 
 
+def validate_operation_batch(ops):
+    """Rebuild batches contain only independent staff/bar targets.
+
+    Rebuilding invalidates native object handles within its bar. Keep ordinary
+    edits separate and refuse even different voices in the same staff/bar.
+    """
+    rebuilds = [row for row in ops if row[6] == 'REPLACE_VOICE']
+    if not rebuilds:
+        return
+    if len(rebuilds) != len(ops):
+        raise ValueError('Voice-rebuild batches cannot mix with other operations')
+    bars = [(row[2], row[3]) for row in rebuilds]
+    if len(set(bars)) != len(bars):
+        raise ValueError('Voice-rebuild batches require distinct staff/bar targets')
+
+
+def export_signatures(value):
+    signatures = value.split(';')
+    if not 1 <= len(signatures) <= 32 or len(set(signatures)) != len(signatures):
+        raise ValueError('Export set requires 1..32 unique part selectors')
+    for signature in signatures:
+        if signature != 'score' and not re.fullmatch(r'[1-9]\d*(,[1-9]\d*)*(#[0-9]+)?', signature):
+            raise ValueError('Invalid export set part selector')
+    return signatures
+
+
 def submit(action, baseline=None, part='score', operations=None, part_name=''):
     RUNTIME.mkdir(parents=True, exist_ok=True)
     with (RUNTIME / '.lock').open('a') as lock:
@@ -288,29 +358,43 @@ def submit(action, baseline=None, part='score', operations=None, part_name=''):
             verified = json.loads((source / 'verified.json').read_text())
             if not verified['ok']:
                 raise ValueError('Baseline has not passed host verification')
+            if verified.get('baseline_usable') is False or verified['action'] == 'EXPORT_PROOF':
+                raise ValueError('PDF-only proof exports are not native edit baselines; use the last guarded job or discover again')
             source_path = source / ('after.tsv' if (source / 'after.tsv').exists() and verified['action'] in {'APPLY','ENSURE_PART'} else 'before.tsv')
             snap = snapshot(source_path)
-            part_pattern = r'[1-9]\d*(,[1-9]\d*)*(#[0-9]+)?' if action in {'EXPORT','INSPECT'} else r'[1-9]\d*(,[1-9]\d*)*'
-            if part != 'score' and not re.fullmatch(part_pattern, part):
+            part_pattern = r'[1-9]\d*(,[1-9]\d*)*(#[0-9]+)?' if action in {'EXPORT','INSPECT','PREVIEW','APPLY'} else r'[1-9]\d*(,[1-9]\d*)*'
+            if action in {'EXPORT_SET', 'EXPORT_PROOF'}:
+                export_signatures(part)
+            elif part != 'score' and not re.fullmatch(part_pattern, part):
                 raise ValueError('Part is score or a comma-separated full-score staff signature')
         ops = []
+        context_path = None
+        compile_snap = snap
+        if action in {'PREVIEW', 'APPLY'} and part != 'score':
+            source_manifest = json.loads((source / 'manifest.json').read_text())
+            context_path = source / ('context-after.tsv' if (source / 'context-after.tsv').exists() else 'context.tsv')
+            if source_manifest['part'] != part or not context_path.exists():
+                raise ValueError('Part edits require a verified export/part-edit baseline for that exact part')
+            compile_snap = snapshot(context_path)
+            if not operations or any(op.get('op') != 'SET' or op.get('property') not in
+                                     {'Dx', 'Dy', 'RhDx', 'RhDy', 'Hidden', 'Magnetic'} for op in operations):
+                raise ValueError('Part context permits only graphical SET operations')
         if action in {'PREVIEW', 'APPLY'}:
             if not operations or not isinstance(operations, list):
                 raise ValueError('A nonempty JSON operation list is required')
             if snap['score'][5] not in {'true', 'True', '1'}:
                 raise ValueError('Baseline must use transposing score mode')
-            ops = [compile_operation(op, snap) for op in operations]
+            ops = [compile_operation(op, compile_snap) for op in operations]
             ids = [op[1] for op in ops]
             targets = [(op[2], op[3], op[4]) for op in ops if op[4] != -1]
             if len(set(ids)) != len(ids) or len(set(targets)) != len(targets):
                 raise ValueError('Duplicate operation id or target; use sequential requests')
+            validate_operation_batch(ops)
         job.mkdir(parents=True)
         recipe_hashes = {}
         for op, row in zip(operations or [], ops):
             if op['op'] != 'REPLACE_VOICE':
                 continue
-            if len(ops) != 1:
-                raise ValueError('A complete-voice rebuild must be the only operation in its request')
             recipe_path = job / ('recipe-' + op['id'] + '.tsv')
             rows = []
             for entry in op['recipe']['tuplets']:
@@ -335,10 +419,13 @@ def submit(action, baseline=None, part='score', operations=None, part_name=''):
         write_rows(job / 'request.tsv', [header, *ops])
         if snap and action in {'PREVIEW', 'APPLY', 'ENSURE_PART'}:
             shutil.copyfile(source_path, job / 'expected.tsv')
+        if context_path is not None:
+            shutil.copyfile(context_path, job / 'expected-context.tsv')
         manifest = {'version': VERSION, 'id': job.name, 'action': action, 'part': part,
                     'baseline': str(source) if snap else None, 'operations': operations or [],
                     'request_sha256': sha(job / 'request.tsv'), 'ops': ops,
-                    'recipe_hashes': recipe_hashes}
+                    'recipe_hashes': recipe_hashes,
+                    'context_sha256': sha(job / 'expected-context.tsv') if context_path is not None else None}
         (job / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         write_rows(pointer, [[str(job)]])
         return {'job': str(job), 'action': action, 'next': 'Run Codex Score Bridge in Sibelius, then collect this job.'}
@@ -352,8 +439,13 @@ def expected_target(before, row):
         if prop == 'Magnetic':
             result['MagneticOverride'] = 'true'
         if prop == 'Text':
-            # Validated separately; formatted text serialization may differ from plain text.
-            result.pop('Formatting', None)
+            plain = formatted_plain(val)
+            if plain is not None:
+                result['Text'] = plain
+                result['Formatting'] = val
+            else:
+                # Legacy plain text may have native style serialization differences.
+                result.pop('Formatting', None)
         if prop == 'Duration':
             result.pop('EndBar', None)
             result.pop('EndPosition', None)
@@ -435,7 +527,10 @@ def verify_changes(before, after, ops, operations=None):
             if values['Position'] != str(row[9]):
                 continue
             if row[6] == 'ADD_TEXT':
-                good = values.get('StyleId') == row[7] and values.get('Text') == row[8] and values['VoiceNumber'] == str(row[10])
+                plain = formatted_plain(row[8])
+                good = values.get('StyleId') == row[7] and values.get('Text') == (row[8] if plain is None else plain) and values['VoiceNumber'] == str(row[10])
+                if plain is not None:
+                    good = good and values.get('Formatting') == row[8]
             elif row[6] == 'ADD_LINE':
                 # Sibelius supports playback passes 1–8. The legacy snapshot also
                 # queries pass 9, which is out of range and always returns false.
@@ -460,6 +555,8 @@ def verify_changes(before, after, ops, operations=None):
             if row[6] == 'PITCH':
                 drop = 'Stemweight'
             elif row[7] == 'Text':
+                if formatted_plain(row[8]) is not None:
+                    continue  # Explicit music-text formatting is compared exactly.
                 drop = 'Formatting'
             elif row[7] == 'Duration':
                 target = expected_target(before['objects'][(*bar, int(row[4]))], row)
@@ -480,6 +577,23 @@ def verify_changes(before, after, ops, operations=None):
     return errors
 
 
+def pdf_set(job, selectors):
+    """Validate every requested PDF; never silently accept a partial export."""
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+    pdfs, errors = {}, []
+    for signature in export_signatures(selectors):
+        pdf = job / f'part-{signature}.pdf'
+        try:
+            pages = len(PdfReader(pdf).pages)
+            if not pages:
+                raise ValueError('Empty exported PDF')
+            pdfs[signature] = dict(pdf=str(pdf), pages=pages, sha256=sha(pdf))
+        except (OSError, ValueError, PdfReadError) as exc:
+            errors.append(f'Export {signature}: {exc}')
+    return pdfs, errors
+
+
 def collect(job):
     job = resolve_job(job)
     manifest = json.loads((job / 'manifest.json').read_text())
@@ -488,6 +602,8 @@ def collect(job):
     for filename, digest in manifest.get('recipe_hashes', {}).items():
         if sha(job / filename) != digest:
             raise ValueError('Voice recipe was modified after submission')
+    if manifest.get('context_sha256') and sha(job / 'expected-context.tsv') != manifest['context_sha256']:
+        raise ValueError('Part baseline was modified after submission')
     if not (job / 'status.tsv').exists():
         return {'job': job.name, 'ok': False, 'state': 'QUEUED'}
     states = read_rows(job / 'status.tsv')
@@ -495,13 +611,33 @@ def collect(job):
     result = {'job': job.name, 'action': manifest['action'], 'state': state, 'ok': False, 'errors': []}
     if state in {'RUNNING', 'HEADER_READ', 'MUTATING'}:
         return result
+    if state == 'PDF_PROOF_EXPORTED' and manifest['action'] == 'EXPORT_PROOF':
+        identity = read_rows(job / 'identity.tsv')
+        expected = ['SCORE', *read_rows(job / 'request.tsv')[0][3:8]]
+        if identity != [expected]:
+            result['errors'].append('Proof export score identity differs from request')
+        result['pdfs'], errors = pdf_set(job, manifest['part'])
+        result['errors'] += errors
+        result.update(baseline_usable=False, musical_state_verified=False,
+                      part_contexts_included=False, requires_visual_review=True,
+                      verification_scope='PDF readability, hashes and score identity only; no native musical snapshot')
+        result['ok'] = not result['errors']
+        (job / 'verified.json').write_text(json.dumps(result, indent=2) + '\n')
+        return result
     if state in {'DONE', 'PREVIEWED', 'EXPORTED_UNVERIFIED', 'APPLIED_UNVERIFIED'}:
         snap = snapshot(job / 'before.tsv')
         result['score'] = snap['score']
         result['object_count'] = len(snap['objects'])
         result['parts'] = read_rows(job / 'parts.tsv')
         if state == 'APPLIED_UNVERIFIED':
-            result['errors'] += verify_changes(snap, snapshot(job / 'after.tsv'), manifest['ops'], manifest['operations'])
+            if manifest.get('context_sha256'):
+                result['errors'] += verify_changes(snap, snapshot(job / 'after.tsv'), [])
+                result['errors'] += verify_changes(snapshot(job / 'context-before.tsv'),
+                    snapshot(job / 'context-after.tsv'), manifest['ops'], manifest['operations'])
+                result['edit_context'] = 'part'
+                result['part_preservation_requires_pdf_check'] = True
+            else:
+                result['errors'] += verify_changes(snap, snapshot(job / 'after.tsv'), manifest['ops'], manifest['operations'])
             for filename in ('before.sib', 'candidate.sib'):
                 p = job / filename
                 if not p.exists() or p.stat().st_size < 100:
@@ -512,13 +648,23 @@ def collect(job):
             result['requires_visual_review'] = True
         if state == 'EXPORTED_UNVERIFIED':
             from pypdf import PdfReader
-            pdf = job / 'part.pdf'
-            reader = PdfReader(pdf)
-            if not reader.pages:
-                result['errors'].append('Empty exported PDF')
-            result['pdf_pages'] = len(reader.pages)
-            result['pdf_sha256'] = sha(pdf)
-            result['pdf'] = str(pdf)
+            if manifest['action'] == 'EXPORT_SET':
+                source = resolve_job(manifest['baseline'])
+                prior_result = json.loads((source / 'verified.json').read_text())
+                prior_file = source / ('after.tsv' if prior_result['action'] in {'APPLY','ENSURE_PART'} else 'before.tsv')
+                result['errors'] += verify_changes(snapshot(prior_file), snap, [])
+                result['observed_full_score_matches_baseline'] = not result['errors']
+                result['pdfs'], errors = pdf_set(job, manifest['part'])
+                result['errors'] += errors
+                result['part_contexts_included'] = False
+            else:
+                pdf = job / 'part.pdf'
+                reader = PdfReader(pdf)
+                if not reader.pages:
+                    result['errors'].append('Empty exported PDF')
+                result['pdf_pages'] = len(reader.pages)
+                result['pdf_sha256'] = sha(pdf)
+                result['pdf'] = str(pdf)
         result['ok'] = not result['errors']
     else:
         result['errors'].append(states[-1][1:] or [state])
@@ -526,7 +672,10 @@ def collect(job):
     return result
 
 
-def invoke(method='Run', arguments=None, timeout=600):
+def invoke(method='Run', arguments=None, timeout=None):
+    timeout = (1800 if method == 'Run' else 30) if timeout is None else timeout
+    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('Timeout must be positive seconds')
     if method == 'Run':
         checked = invoke('ProtocolTest').get('returnValue', {})
         if checked.get('version') != VERSION or checked.get('build') != hashlib.sha256(native_source().encode()).hexdigest():
@@ -552,7 +701,10 @@ def invoke(method='Run', arguments=None, timeout=600):
         if state['status'] in {'disconnected','stopped','connection failed'}:
             raise ValueError('Sibelius connection ended during the request. Retain its recovery copy; do not retry blindly.')
         if time.monotonic() > deadline:
-            raise ValueError('Native operation has not completed; inspect status before retrying')
+            job_name = Path(invocation.get('job', '')).name
+            raise ValueError(f'Wait expired; native request may still be running. '
+                             f'Invocation {invocation["id"]}, job {job_name or "none"}. '
+                             'Use status/collect; do not submit or invoke it again.')
         time.sleep(0.2)
     result = json.loads(reply.read_text())
     if not result['result']:
@@ -587,26 +739,66 @@ def recover_job(job):
     return resolved
 
 
+def job_status(job=None):
+    """Read local evidence without invoking Sibelius or taking another inventory."""
+    connection_path = RUNTIME / 'connection.json'
+    connection = json.loads(connection_path.read_text()) if connection_path.exists() else {}
+    alive = False
+    if connection.get('pid'):
+        try:
+            os.kill(connection['pid'], 0)
+            alive = True
+        except ProcessLookupError:
+            pass
+    result = dict(connection=connection, daemon_process_alive=alive)
+    if job is None and (RUNTIME / 'pending.txt').exists():
+        job = (RUNTIME / 'pending.txt').read_text(encoding='utf-16').strip()
+    if job:
+        path = resolve_job(job)
+        result['job'] = str(path)
+        result['native_status'] = read_rows(path / 'status.tsv') if (path / 'status.tsv').exists() else [['QUEUED']]
+        verified = json.loads((path / 'verified.json').read_text()) if (path / 'verified.json').exists() else None
+        result['host_result'] = None if verified is None else {
+            key: verified[key] for key in ('ok', 'action', 'state', 'errors', 'baseline_usable',
+                                           'musical_state_verified', 'requires_visual_review') if key in verified}
+        if verified and 'pdfs' in verified:
+            result['pdf_count'] = len(verified['pdfs'])
+            result['pdf_pages'] = sum(item['pages'] for item in verified['pdfs'].values())
+        result['recovery_copy_exists'] = (path / 'before.sib').exists()
+    result['note'] = 'Daemon liveness/status files do not establish native progress or musical correctness.'
+    return result
+
+
+def positive_seconds(value):
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError('Timeout must be finite positive seconds')
+    return seconds
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('install'); p.add_argument('--destination')
-    p = sub.add_parser('discover'); p.add_argument('--run', action='store_true')
-    for cmd in ('inspect', 'export', 'preview', 'apply', 'ensure-part'):
+    p = sub.add_parser('discover'); p.add_argument('--run', action='store_true'); p.add_argument('--timeout', type=positive_seconds, default=1800)
+    for cmd in ('inspect', 'export', 'export-set', 'export-proof', 'preview', 'apply', 'ensure-part'):
         p = sub.add_parser(cmd); p.add_argument('--baseline', required=True); p.add_argument('--part', default='score')
         p.add_argument('--run', action='store_true')
+        p.add_argument('--timeout', type=positive_seconds, default=1800)
         if cmd in {'preview', 'apply'}:
             p.add_argument('--operations', required=True, type=Path)
         if cmd == 'ensure-part':
             p.add_argument('--name', required=True)
     p = sub.add_parser('collect'); p.add_argument('job')
-    sub.add_parser('invoke')
+    p = sub.add_parser('invoke'); p.add_argument('--timeout', type=positive_seconds, default=1800)
+    p = sub.add_parser('status'); p.add_argument('job', nargs='?')
     sub.add_parser('doctor')
     p = sub.add_parser('open'); p.add_argument('path', type=Path)
+    p = sub.add_parser('show-part'); p.add_argument('--score', required=True, type=Path); p.add_argument('--part', required=True)
     p = sub.add_parser('recover'); p.add_argument('job')
     p = sub.add_parser('abandon'); p.add_argument('job'); p.add_argument('--reason', required=True)
     p = sub.add_parser('recipe'); p.add_argument('job'); p.add_argument('--staff', type=int, required=True); p.add_argument('--bar', type=int, required=True); p.add_argument('--voice', type=int, default=1)
-    p = sub.add_parser('show'); p.add_argument('job'); p.add_argument('--staff', type=int); p.add_argument('--bars', default='1:99999')
+    p = sub.add_parser('show'); p.add_argument('job'); p.add_argument('--staff', type=int); p.add_argument('--bars', default='1:99999'); p.add_argument('--context', choices=['score', 'part'], default='score')
     args = parser.parse_args()
     try:
         if args.command == 'install':
@@ -614,7 +806,9 @@ def main():
         elif args.command == 'collect':
             result = collect(args.job)
         elif args.command == 'invoke':
-            result = invoke()
+            result = invoke(timeout=args.timeout)
+        elif args.command == 'status':
+            result = job_status(args.job)
         elif args.command == 'doctor':
             result = invoke('ProtocolTest')
         elif args.command == 'open':
@@ -626,6 +820,14 @@ def main():
             result['active_score'] = wait_for_score(args.path)
         elif args.command == 'recover':
             result = recover_job(args.job)
+        elif args.command == 'show-part':
+            if not args.score.is_absolute() or args.score.suffix != '.sib':
+                raise ValueError('Show part requires the exact absolute active score filename')
+            if len(export_signatures(args.part)) != 1:
+                raise ValueError('Show part requires one selector')
+            result = invoke('ShowPart', [str(args.score), args.part])
+            if not result.get('returnValue'):
+                raise ValueError('Active score differs or part is missing/ambiguous')
         elif args.command == 'abandon':
             job = resolve_job(args.job)
             if (job / 'before.sib').exists():
@@ -638,14 +840,17 @@ def main():
             result = extract_recipe(snap, args.staff, args.bar, args.voice)
         elif args.command == 'show':
             job = resolve_job(args.job)
-            snap = snapshot(job / ('after.tsv' if (job / 'after.tsv').exists() else 'before.tsv'))
+            if args.context == 'part':
+                snap = snapshot(job / ('context-after.tsv' if (job / 'context-after.tsv').exists() else 'context.tsv'))
+            else:
+                snap = snapshot(job / ('after.tsv' if (job / 'after.tsv').exists() else 'before.tsv'))
             first, last = map(int, args.bars.split(':'))
             result = [{'staff': k[0], 'bar': k[1], 'ordinal': k[2], **v} for k, v in snap['objects'].items() if (args.staff is None or k[0] == args.staff) and first <= k[1] <= last]
         else:
             ops = json.loads(args.operations.read_text()) if hasattr(args, 'operations') else None
             result = submit(args.command.upper().replace('-','_'), getattr(args, 'baseline', None), getattr(args, 'part', 'score'), ops, getattr(args,'name',''))
             if getattr(args, 'run', False):
-                invoke()
+                invoke(timeout=args.timeout)
                 result = collect(result['job'])
         print(json.dumps(result, indent=2))
     except (ValueError, KeyError, OSError) as exc:

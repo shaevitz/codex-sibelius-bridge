@@ -5,6 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), 'runtime');
 fs.mkdirSync(root, {recursive:true, mode:0o700});
+const snapshotFiles = ['before.tsv','context.tsv','after.tsv','context-before.tsv','context-after.tsv','identity.tsv'];
 const statePath = path.join(root, 'connection.json');
 const inbox = path.join(root, 'invoke.json');
 const prior = (() => {try {return JSON.parse(fs.readFileSync(statePath,'utf8'));} catch {return {};}})();
@@ -26,7 +27,7 @@ ws.addEventListener('message', event => {
   } else if (message.message === 'invokePluginResponse' && busy) {
     const payload = message.returnValue ?? message.return_value;
     let summary = payload;
-    if (payload && typeof payload === 'object' && ['before.tsv','context.tsv','after.tsv'].some(name => Array.isArray(payload[name]))) {
+    if (payload && typeof payload === 'object' && snapshotFiles.some(name => Array.isArray(payload[name]))) {
       const actualRoot = fs.realpathSync(path.join(root, 'jobs')) + path.sep;
       const reportedJob = payload.job || busy.job;
       if (!reportedJob) throw new Error('Native response has no job identity');
@@ -34,7 +35,7 @@ ws.addEventListener('message', event => {
       if (!actualJob.startsWith(actualRoot) || !fs.existsSync(path.join(actualJob,'manifest.json'))) throw new Error('Native response points outside a known job');
       if (busy.job && fs.realpathSync(busy.job) !== actualJob) throw new Error('Native response belongs to another job');
       const counts = {};
-      for (const name of ['before.tsv','context.tsv','after.tsv']) {
+      for (const name of snapshotFiles) {
         const rows = payload[name];
         if (rows === undefined) continue;
         if (!Array.isArray(rows) || !rows.every(row => typeof row === 'string')) throw new Error('Invalid native snapshot response');
@@ -57,13 +58,14 @@ const poll = setInterval(() => {
   let request;
   try { request = JSON.parse(fs.readFileSync(inbox,'utf8')); } catch {return;}
   if (request.id === lastId) return;
-  if (!/^[a-f0-9]{32}$/.test(request.id) || !['Run','OpenScore','RecoverJob','ProtocolTest','ScoreStatus','GetLastResult'].includes(request.method) || !Array.isArray(request.args)) {
+  if (!/^[a-f0-9]{32}$/.test(request.id) || !['Run','OpenScore','RecoverJob','ProtocolTest','ScoreStatus','GetLastResult','ShowPart'].includes(request.method) || !Array.isArray(request.args)) {
     state('invalid invocation'); return;
   }
   if (request.method === 'Run' && request.args.length !== 0) return;
   if (request.method === 'ProtocolTest' && request.args.length !== 0) return;
   if (request.method === 'ScoreStatus' && request.args.length !== 0) return;
   if (request.method === 'GetLastResult' && request.args.length !== 0) return;
+  if (request.method === 'ShowPart' && (request.args.length !== 2 || !path.isAbsolute(request.args[0]) || !request.args[0].endsWith('.sib') || !/^(score|[1-9]\d*(,[1-9]\d*)*(#[0-9]+)?)$/.test(request.args[1]))) return;
   if (request.method === 'OpenScore' && (request.args.length !== 1 || !path.isAbsolute(request.args[0]) || !request.args[0].endsWith('.sib'))) return;
   if (request.method === 'RecoverJob' && (request.args.length !== 1 || !path.isAbsolute(request.args[0]) || !fs.realpathSync(request.args[0]).startsWith(fs.realpathSync(path.join(root,'jobs'))+path.sep))) return;
   lastId = request.id; busy = request; state('running');
